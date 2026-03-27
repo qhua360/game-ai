@@ -17,11 +17,21 @@ JEPA-powered ice hockey game AI. Pygame prototype with PyTorch for AI training. 
   - `human_play.py` — keyboard-controlled game loop
 - `ai/` — AI agents
   - `scripted_bot.py` — rule-based bot with easy/medium/hard difficulty
+- `model/` — JEPA world model (~12.5M params)
+  - `encoder.py` — ViT-Tiny via `stable_pretraining.backbone.utils.vit_hf()` (84x84 → 192-dim)
+  - `predictor.py` — 6-layer AR Transformer with AdaLN action conditioning
+  - `sigreg.py` — SIGReg anti-collapse regularization (Epps-Pulley Gaussianity test)
+  - `world_model.py` — LeWM combining encoder + predictor, with rollout() for planning
+  - `train.py` — Training via spt.Module + spt.Manager with WandB logging
+- `data/` — Data collection pipeline
+  - `collector.py` — parallel bot-vs-bot trajectory collection, streams to HDF5, PLAY-phase only
+  - `dataset.py` — PyTorch Dataset with configurable frameskip and stride
+  - `merge_shards.py` — streaming merge of parallel collection shards
+- `config/train/hockey.yaml` — Hydra training config
 
 ### Planned
-- `core/` — Game-agnostic AI framework (base env, world model, planner, trainer)
-- `model/` — JEPA model components (ViT encoder, Transformer predictor, SIGReg)
-- `data/` — Data collection and dataset loading
+- `ai/jepa_agent.py` — JEPA planning agent (MPC + discrete CEM)
+- `core/` — Game-agnostic AI framework (base env, planner, trainer)
 - `training/` — Self-play loop, curriculum, evaluation
 
 ## Tech Stack
@@ -29,14 +39,18 @@ JEPA-powered ice hockey game AI. Pygame prototype with PyTorch for AI training. 
 - Python 3.11+ (managed with uv)
 - Pygame 2.x (game)
 - PyTorch 2.x (AI training)
+- stable-pretraining (ViT backbone, Lightning training framework)
+- stable-worldmodel (CEM solver, data utilities)
 - Gymnasium (RL interface)
 - NumPy, h5py (data storage)
+- WandB (experiment tracking)
 
 ## Commands
 
 ```bash
 # Install dependencies
 uv sync
+uv pip install -e ../stable-pretraining
 
 # Play the game
 uv run python -m games.hockey
@@ -46,6 +60,13 @@ uv run pytest
 
 # Run tests with verbose output
 uv run pytest -v
+
+# Collect training data (50 complete games, PLAY-phase only)
+uv run python -m data.collector --episodes 50 --output data/trajectories/train.h5
+
+# Train JEPA world model (20 epochs, ~3.5h on MPS)
+PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m model.train \
+    --data data/trajectories/train.h5 --epochs 20 --batch-size 128
 
 # Headless bot-vs-bot smoke test
 uv run python -c "

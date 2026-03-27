@@ -8,19 +8,19 @@ Sports game AI today is scripted — behavior trees, finite state machines, pred
 
 This project replaces that with a **JEPA (Joint Embedding Predictive Architecture) world model** — a neural network that learns how the game world works by watching gameplay, then **imagines future outcomes** to pick the best action. The result is AI that generalizes to novel situations instead of following a script.
 
-### How the AI works (planned)
+### How the AI works
 
 ```
-Game Frame → ViT Encoder → Latent Embedding (192-dim)
-                                    ↓
-Current Latent + Actions → Transformer Predictor → Predicted Future
-                                    ↓
-MPC Planner → Imagine 300 futures → Pick the best one → Act
+Game Frame (84x84) → ViT Encoder → Latent Embedding (192-dim)
+                                         ↓
+Current Latent + Actions → Transformer Predictor (AdaLN) → Predicted Future
+                                         ↓
+Loss = MSE(predicted, actual) + 0.09 * SIGReg(embeddings)
 ```
 
-The AI "reads the play" — it encodes what it sees, imagines what could happen next for hundreds of possible actions, and picks the sequence that leads to scoring.
+The world model learns game dynamics from pixels — given the current state and actions, it predicts what happens next in latent space. Training uses two losses: prediction accuracy (MSE) and anti-collapse regularization (SIGReg).
 
-Based on [LeWorldModel](https://github.com/lucas-maes/le-wm) ([paper](https://arxiv.org/html/2603.19312v1)) — a 15M parameter JEPA that trains on a single GPU in hours and plans in under a second.
+Based on [LeWorldModel](https://github.com/lucas-maes/le-wm) ([paper](https://arxiv.org/html/2603.19312v1)) — a ~12.5M parameter JEPA that trains on a single GPU in hours. Uses [stable-pretraining](https://github.com/rbalestr-lab/stable-pretraining) for the ViT backbone and training framework.
 
 ## The Game: Ice Hockey 3v3
 
@@ -37,9 +37,17 @@ Top-down 2D ice hockey with real physics:
 ```bash
 # Install dependencies (requires uv: https://docs.astral.sh/uv/)
 uv sync
+uv pip install -e ../stable-pretraining  # local clone required
 
 # Play against scripted bots
 uv run python -m games.hockey
+
+# Collect training data (50 complete games, ~2 min with 5 parallel shards)
+uv run python -m data.collector --episodes 50 --output data/trajectories/train.h5
+
+# Train the JEPA world model (~3.5 hours on MPS, 20 epochs)
+PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m model.train \
+    --data data/trajectories/train.h5 --epochs 20 --batch-size 128
 
 # Run tests
 uv run pytest
@@ -71,29 +79,33 @@ games/hockey/       # Ice hockey game
 
 ai/                 # AI agents
   scripted_bot.py   #   Rule-based bot (easy/medium/hard difficulty)
+
+model/              # JEPA world model (~12.5M params)
+  encoder.py        #   ViT-Tiny encoder via stable-pretraining vit_hf()
+  predictor.py      #   AR Transformer predictor with AdaLN action conditioning
+  sigreg.py         #   SIGReg anti-collapse regularization
+  world_model.py    #   LeWM: encoder + predictor combined
+  train.py          #   Training via spt.Module + spt.Manager + WandB
+
+data/               # Data pipeline
+  collector.py      #   Parallel bot-vs-bot trajectory collection to HDF5
+  dataset.py        #   PyTorch dataset with frameskip and stride
+  merge_shards.py   #   Streaming merge of parallel collection shards
+
+config/train/       # Training configs
+  hockey.yaml       #   Hydra config matching LeWM pattern
 ```
 
 ### Planned (not yet implemented)
 
 ```
-core/               # Game-agnostic AI framework
-  base_env.py       #   Abstract environment interface
-  world_model.py    #   JEPA world model (works with any game)
-  planner.py        #   MPC + CEM action planner
-  trainer.py        #   Training pipeline
+ai/
+  jepa_agent.py     #   JEPA planning agent (MPC + discrete CEM)
+  evaluate_jepa.py  #   Evaluation: JEPA vs scripted bots
 
-model/              # JEPA components
-  encoder.py        #   ViT-Tiny encoder
-  predictor.py      #   Transformer predictor with AdaLN
-  sigreg.py         #   Anti-collapse regularization
-
-data/               # Data pipeline
-  collector.py      #   Trajectory collection from gameplay
-  dataset.py        #   PyTorch dataset for training
-
-training/           # Training loop
+training/           # Self-play loop
   self_play.py      #   Self-play improvement
-  evaluation.py     #   Win rate & generalization metrics
+  evaluation.py     #   Generalization metrics
 ```
 
 ## Testing
@@ -147,8 +159,11 @@ The endgame is a real, shippable game:
 - **Python 3.11+** — managed with [uv](https://docs.astral.sh/uv/)
 - **Pygame 2.x** — game engine (prototype)
 - **PyTorch 2.x** — AI training
+- **[stable-pretraining](https://github.com/rbalestr-lab/stable-pretraining)** — ViT backbone, Lightning training framework
+- **[stable-worldmodel](https://github.com/galilai-group/stable-worldmodel)** — CEM solver, data utilities
 - **Gymnasium** — RL environment interface
 - **NumPy / HDF5** — data storage
+- **WandB** — experiment tracking
 
 ## References
 
