@@ -216,9 +216,12 @@ class Renderer:
 
         # Jersey number
         if self._font:
-            num_text = self._font.render(str(player.player_id % 3 + 1), True, (255, 255, 255))
-            text_rect = num_text.get_rect(center=(px, py))
-            surf.blit(num_text, text_rect)
+            try:
+                num_text = self._font.render(str(player.player_id % 3 + 1), True, (255, 255, 255))
+                text_rect = num_text.get_rect(center=(px, py))
+                surf.blit(num_text, text_rect)
+            except pygame.error:
+                pass  # font not available in headless mode
 
     def _draw_puck(self, surf: pygame.Surface, state: GameState) -> None:
         """Draw the puck with optional speed trail."""
@@ -261,32 +264,36 @@ class Renderer:
         hud_rect = pygame.Rect(0, 0, WINDOW_WIDTH, hud_h)
         pygame.draw.rect(surf, HUD_BG_COLOR, hud_rect)
 
-        # Score
-        mins = int(state.time_remaining) // 60
-        secs = int(state.time_remaining) % 60
-        score_text = f"RED  {state.score[0]}  -  {state.score[1]}  BLUE"
-        time_text = f"P{state.period}  {mins:02d}:{secs:02d}"
+        try:
+            mins = int(state.time_remaining) // 60
+            secs = int(state.time_remaining) % 60
+            score_text = f"RED  {state.score[0]}  -  {state.score[1]}  BLUE"
+            time_text = f"P{state.period}  {mins:02d}:{secs:02d}"
 
-        score_surf = self._font.render(score_text, True, HUD_TEXT_COLOR)
-        time_surf = self._font.render(time_text, True, HUD_TEXT_COLOR)
+            score_surf = self._font.render(score_text, True, HUD_TEXT_COLOR)
+            time_surf = self._font.render(time_text, True, HUD_TEXT_COLOR)
 
-        surf.blit(score_surf, (WINDOW_WIDTH // 2 - score_surf.get_width() // 2, 5))
-        surf.blit(time_surf, (WINDOW_WIDTH - time_surf.get_width() - 15, 5))
+            surf.blit(score_surf, (WINDOW_WIDTH // 2 - score_surf.get_width() // 2, 5))
+            surf.blit(time_surf, (WINDOW_WIDTH - time_surf.get_width() - 15, 5))
 
-        # Controls hint
-        hint = "Arrows:Move  Space:Shoot  P:Pass  C:Check  Tab:Switch  M:Mute"
-        hint_surf = self._font.render(hint, True, (140, 140, 160))
-        surf.blit(hint_surf, (10, WINDOW_HEIGHT - 22))
+            hint = "Arrows:Move  Space:Shoot  P:Pass  C:Check  Tab:Switch  M:Mute"
+            hint_surf = self._font.render(hint, True, (140, 140, 160))
+            surf.blit(hint_surf, (10, WINDOW_HEIGHT - 22))
+        except pygame.error:
+            pass  # font not available in headless mode
 
     def _draw_centered_text(self, surf: pygame.Surface, text: str, alpha: int = 200) -> None:
         """Draw big centered text with semi-transparent background."""
         if not self._big_font:
             return
-        text_surf = self._big_font.render(text, True, (255, 255, 255))
-        tw, th = text_surf.get_size()
-        padding = 20
+        try:
+            text_surf = self._big_font.render(text, True, (255, 255, 255))
+            tw, th = text_surf.get_size()
+            padding = 20
 
-        bg = pygame.Surface((tw + padding * 2, th + padding * 2), pygame.SRCALPHA)
-        bg.fill((0, 0, 0, alpha))
-        surf.blit(bg, (WINDOW_WIDTH // 2 - tw // 2 - padding, WINDOW_HEIGHT // 2 - th // 2 - padding))
-        surf.blit(text_surf, (WINDOW_WIDTH // 2 - tw // 2, WINDOW_HEIGHT // 2 - th // 2))
+            bg = pygame.Surface((tw + padding * 2, th + padding * 2), pygame.SRCALPHA)
+            bg.fill((0, 0, 0, alpha))
+            surf.blit(bg, (WINDOW_WIDTH // 2 - tw // 2 - padding, WINDOW_HEIGHT // 2 - th // 2 - padding))
+            surf.blit(text_surf, (WINDOW_WIDTH // 2 - tw // 2, WINDOW_HEIGHT // 2 - th // 2))
+        except pygame.error:
+            pass  # font not available in headless mode

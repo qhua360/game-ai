@@ -118,29 +118,61 @@ class LeWM(nn.Module):
         hist = self.history_size
 
         ctx = initial_emb.unsqueeze(1).expand(B, S, hist, D).reshape(B * S, hist, D)
+        # Pad action history with zeros to match history size
+        act_history = torch.zeros(B * S, hist, A, device=initial_emb.device, dtype=action_sequences.dtype)
         predictions = []
 
         for t in range(H):
             act = action_sequences[:, :, t].reshape(B * S, 1, A)
 
-            if t == 0:
-                ctx_act = torch.zeros(B * S, hist, A, device=ctx.device, dtype=act.dtype)
-                ctx_act[:, -1] = act.squeeze(1)
-            else:
-                ctx_act = act_history[:, -hist:]
+            # Shift action history left and insert new action at the end
+            act_history = torch.cat([act_history[:, 1:], act], dim=1)  # (B*S, hist, A)
 
-            pred = self.predict(ctx[:, -hist:], ctx_act)
-            next_emb = pred[:, -1:]
+            pred = self.predict(ctx[:, -hist:], act_history)  # (B*S, hist, D)
+            next_emb = pred[:, -1:]  # (B*S, 1, D)
             predictions.append(next_emb)
 
             ctx = torch.cat([ctx, next_emb], dim=1)
-            if t == 0:
-                act_history = act
-            else:
-                act_history = torch.cat([act_history, act], dim=1)
 
         result = torch.cat(predictions, dim=1).reshape(B, S, H, D)
         return result
+
+    def criterion(
+        self,
+        predicted_emb: torch.Tensor,
+        goal_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute MSE cost between final predicted embedding and goal.
+
+        Args:
+            predicted_emb: (B, S, H, D) predicted trajectory embeddings.
+            goal_emb: (B, 1, D) goal state embedding.
+
+        Returns:
+            (B, S) cost per sample — lower is better.
+        """
+        final = predicted_emb[:, :, -1]  # (B, S, D)
+        goal = goal_emb.expand_as(final)  # (B, S, D)
+        return (final - goal).pow(2).mean(dim=-1)  # (B, S)
+
+    def get_cost(
+        self,
+        initial_emb: torch.Tensor,
+        goal_emb: torch.Tensor,
+        action_candidates: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute cost for CEM planning.
+
+        Args:
+            initial_emb: (1, history_size, D) context embeddings.
+            goal_emb: (1, 1, D) goal state embedding.
+            action_candidates: (1, S, H, 6) candidate action sequences.
+
+        Returns:
+            (1, S) cost per candidate.
+        """
+        predicted = self.rollout(initial_emb, action_candidates)  # (1, S, H, D)
+        return self.criterion(predicted, goal_emb)  # (1, S)
 
     def param_count(self) -> dict[str, int]:
         """Count parameters by component."""

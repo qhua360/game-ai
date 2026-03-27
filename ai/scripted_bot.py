@@ -23,20 +23,23 @@ from games.hockey.constants import (
     TEAM_A,
     TEAM_B,
 )
+import numpy as np
+
+from ai.base_agent import Agent
 from games.hockey.entities import GameState, Phase, Player
 
 
-class ScriptedBot:
+class ScriptedBot(Agent):
     """Rule-based bot with adjustable difficulty."""
 
     def __init__(self, team: int, difficulty: str = "medium") -> None:
-        self.team = team
+        super().__init__(team)
         self.difficulty = difficulty
         self._reaction_frames = {"easy": 12, "medium": 6, "hard": 0}[difficulty]
         self._random_chance = {"easy": 0.30, "medium": 0.10, "hard": 0.02}[difficulty]
         self._frame_counter = 0
 
-    def get_actions(self, state: GameState) -> list[int]:
+    def get_actions(self, state: GameState, obs: np.ndarray | None = None) -> list[int]:
         """Return one action per player on this team."""
         self._frame_counter += 1
 
