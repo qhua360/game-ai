@@ -6,16 +6,27 @@ JEPA-powered ice hockey game AI. Pygame prototype with PyTorch for AI training. 
 
 ## Architecture
 
+### Implemented
+- `games/hockey/` — Ice hockey game
+  - `constants.py` — all tuning knobs (physics, rink dimensions, colors, sound)
+  - `entities.py` — Player, Puck, Goal, Rink, GameState dataclasses
+  - `physics.py` — ice friction, collisions, shots, passes, goal detection, event system
+  - `sound.py` — numpy-synthesized sound effects (no asset files)
+  - `renderer.py` — Pygame top-down rendering with HUD and visual effects
+  - `env.py` — Gymnasium-compatible environment (84x84 RGB obs)
+  - `human_play.py` — keyboard-controlled game loop
+- `ai/` — AI agents
+  - `scripted_bot.py` — rule-based bot with easy/medium/hard difficulty
+
+### Planned
 - `core/` — Game-agnostic AI framework (base env, world model, planner, trainer)
-- `games/hockey/` — Ice hockey game (env, physics, renderer)
-- `ai/` — AI agents (scripted bots, JEPA agent, policy network)
 - `model/` — JEPA model components (ViT encoder, Transformer predictor, SIGReg)
 - `data/` — Data collection and dataset loading
 - `training/` — Self-play loop, curriculum, evaluation
 
 ## Tech Stack
 
-- Python 3.11+
+- Python 3.11+ (managed with uv)
 - Pygame 2.x (game)
 - PyTorch 2.x (AI training)
 - Gymnasium (RL interface)
@@ -24,29 +35,43 @@ JEPA-powered ice hockey game AI. Pygame prototype with PyTorch for AI training. 
 ## Commands
 
 ```bash
+# Install dependencies
+uv sync
+
 # Play the game
-python -m games.hockey.human_play
+uv run python -m games.hockey
 
-# Collect training data
-python -m data.collector --episodes 10000
+# Run tests
+uv run pytest
 
-# Train JEPA world model
-python -m model.train --data data/trajectories/ --epochs 100
+# Run tests with verbose output
+uv run pytest -v
 
-# Evaluate AI vs scripted bots
-python -m training.evaluation
-
-# Run self-play training loop
-python -m training.self_play
+# Headless bot-vs-bot smoke test
+uv run python -c "
+import os; os.environ['SDL_VIDEODRIVER']='dummy'; os.environ['SDL_AUDIODRIVER']='dummy'
+import pygame; pygame.init(); pygame.display.set_mode((100,100))
+from games.hockey.env import HockeyEnv
+from ai.scripted_bot import ScriptedBot
+env = HockeyEnv(render_mode='rgb_array')
+bot_a, bot_b = ScriptedBot(0), ScriptedBot(1)
+obs, info = env.reset()
+for _ in range(600):
+    obs, r, d, t, info = env.step(bot_a.get_actions(info['state']), bot_b.get_actions(info['state']))
+print(f'Score: {info[\"score\"]}')
+env.close()
+"
 ```
 
 ## Key Design Decisions
 
-- **Pluggable architecture**: `core/base_env.py` defines the interface. New games implement it. JEPA model stays the same.
+- **Pluggable architecture**: `core/base_env.py` will define the interface. New games implement it. JEPA model stays the same.
 - **Observation space**: 84x84 RGB frames (from Pygame renderer)
-- **Action space**: Discrete — 8 directions + shoot + pass + check (11 actions per player)
+- **Action space**: Discrete — 8 directions + shoot + pass + check + none (12 actions per player)
 - **3v3 hockey**: Enough complexity for team play, tractable for training
 - **JEPA over generative models**: Learns in latent space (192-dim), not pixel space. Faster, more stable, better generalization.
+- **Synthesized sound**: All sound effects generated via numpy at startup — no external audio assets needed.
+- **Event system**: `physics.step_physics()` returns Event objects that drive both sound and visual effects.
 
 ## Conventions
 
@@ -54,4 +79,5 @@ python -m training.self_play
 - Type hints everywhere
 - Gymnasium API for all environments (`reset`, `step`, `render`)
 - PyTorch for all neural network code
-- Tests in `tests/` directory, run with `pytest`
+- Tests in `tests/` directory, run with `uv run pytest`
+- Use `uv` for all dependency management (not pip)

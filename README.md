@@ -8,7 +8,7 @@ Sports game AI today is scripted — behavior trees, finite state machines, pred
 
 This project replaces that with a **JEPA (Joint Embedding Predictive Architecture) world model** — a neural network that learns how the game world works by watching gameplay, then **imagines future outcomes** to pick the best action. The result is AI that generalizes to novel situations instead of following a script.
 
-### How the AI works
+### How the AI works (planned)
 
 ```
 Game Frame → ViT Encoder → Latent Embedding (192-dim)
@@ -29,28 +29,51 @@ Top-down 2D ice hockey with real physics:
 - **Ice friction** — momentum-based skating, puck slides with damping
 - **Team play** — 3v3 with passing, shooting, body checking
 - **You play too** — control one player with keyboard, AI handles the rest
+- **Sound effects** — synthesized audio (shots, hits, goal horn, whistle, buzzer) — no asset files needed
 - **Gymnasium API** — standard RL interface for training
 
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
+# Install dependencies (requires uv: https://docs.astral.sh/uv/)
+uv sync
 
 # Play against scripted bots
-python -m games.hockey.human_play
+uv run python -m games.hockey
 
-# Collect training data
-python -m data.collector --episodes 10000
-
-# Train the JEPA world model
-python -m model.train --data data/trajectories/ --epochs 100
-
-# Evaluate JEPA agent vs scripted bots
-python -m training.evaluation
+# Run tests
+uv run pytest
 ```
 
+### Controls
+
+| Key | Action |
+|-----|--------|
+| Arrow keys / WASD | Move player |
+| Space | Shoot toward opponent goal |
+| P | Pass to nearest teammate |
+| C | Body check |
+| Tab | Switch controlled player |
+| M | Mute / unmute sound |
+| Esc | Quit |
+
 ## Project Structure
+
+```
+games/hockey/       # Ice hockey game
+  constants.py      #   All tuning knobs (physics, rink, colors, sound)
+  entities.py       #   Player, Puck, Goal, Rink, GameState dataclasses
+  physics.py        #   Ice friction, collisions, shots, passes, goals
+  sound.py          #   Numpy-synthesized sound effects (no asset files)
+  renderer.py       #   Pygame top-down rendering with HUD
+  env.py            #   Gymnasium-compatible environment
+  human_play.py     #   Keyboard-controlled game loop
+
+ai/                 # AI agents
+  scripted_bot.py   #   Rule-based bot (easy/medium/hard difficulty)
+```
+
+### Planned (not yet implemented)
 
 ```
 core/               # Game-agnostic AI framework
@@ -58,16 +81,6 @@ core/               # Game-agnostic AI framework
   world_model.py    #   JEPA world model (works with any game)
   planner.py        #   MPC + CEM action planner
   trainer.py        #   Training pipeline
-
-games/hockey/       # Ice hockey game
-  env.py            #   Gymnasium environment
-  physics.py        #   Ice/puck/player physics
-  renderer.py       #   Pygame rendering
-
-ai/                 # AI agents
-  scripted_bot.py   #   Rule-based baseline bots
-  jepa_agent.py     #   JEPA world model agent
-  policy_net.py     #   Distilled policy for deployment
 
 model/              # JEPA components
   encoder.py        #   ViT-Tiny encoder
@@ -81,6 +94,34 @@ data/               # Data pipeline
 training/           # Training loop
   self_play.py      #   Self-play improvement
   evaluation.py     #   Win rate & generalization metrics
+```
+
+## Testing
+
+```bash
+# Run all tests
+uv run pytest
+
+# Run with verbose output
+uv run pytest -v
+
+# Run a specific test file
+uv run pytest tests/test_physics.py
+
+# Headless bot-vs-bot smoke test (no window needed)
+uv run python -c "
+import os; os.environ['SDL_VIDEODRIVER']='dummy'; os.environ['SDL_AUDIODRIVER']='dummy'
+import pygame; pygame.init(); pygame.display.set_mode((100,100))
+from games.hockey.env import HockeyEnv
+from ai.scripted_bot import ScriptedBot
+env = HockeyEnv(render_mode='rgb_array')
+bot_a, bot_b = ScriptedBot(0), ScriptedBot(1)
+obs, info = env.reset()
+for _ in range(600):
+    obs, r, d, t, info = env.step(bot_a.get_actions(info['state']), bot_b.get_actions(info['state']))
+print(f'Score: RED {info[\"score\"][0]} - {info[\"score\"][1]} BLUE')
+env.close()
+"
 ```
 
 ## Pluggable Across Games
@@ -103,7 +144,7 @@ The endgame is a real, shippable game:
 
 ## Tech Stack
 
-- **Python 3.11+**
+- **Python 3.11+** — managed with [uv](https://docs.astral.sh/uv/)
 - **Pygame 2.x** — game engine (prototype)
 - **PyTorch 2.x** — AI training
 - **Gymnasium** — RL environment interface
