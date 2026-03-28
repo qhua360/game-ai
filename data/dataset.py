@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import h5py
 import numpy as np
 import torch
@@ -9,11 +11,10 @@ from torch.utils.data import Dataset
 
 
 class HockeyTrajectoryDataset(Dataset):
-    """Loads sub-trajectories from HDF5 for JEPA training.
+    """Loads sub-trajectories for JEPA training.
 
-    Each sample is a sequence of (seq_len) frames sampled with frameskip
-    between frames. Sample start positions are strided by `stride` to
-    control overlap:
+    Converts HDF5 to memory-mapped numpy files on first load for fast
+    random access that scales to any dataset size.
 
         frameskip=15, stride=3, seq_len=4:
         Sample 0: frames [0,  15, 30, 45]
@@ -35,19 +36,62 @@ class HockeyTrajectoryDataset(Dataset):
         frameskip: int = 15,
         stride: int = 3,
     ) -> None:
-        self.path = path
         self.seq_len = seq_len
         self.frameskip = frameskip
         self.stride = stride
-        self.span = (seq_len - 1) * frameskip  # raw frames covered by one sample
+        self.span = (seq_len - 1) * frameskip
 
-        # Load metadata into memory (small arrays)
-        with h5py.File(path, "r") as f:
-            self.num_frames = f["observations"].shape[0]
-            self.episode_ids = f["episode_ids"][:]
+        # Convert HDF5 to memmap on first use, then open memmap
+        mmap_dir = path + ".mmap"
+        if not os.path.exists(mmap_dir):
+            self._convert_hdf5_to_memmap(path, mmap_dir)
 
-        # Precompute valid start indices
+        self._obs = np.memmap(
+            os.path.join(mmap_dir, "obs.npy"), dtype=np.uint8, mode="r",
+        ).reshape(-1, 84, 84, 3)
+        self._actions_a = np.memmap(
+            os.path.join(mmap_dir, "actions_a.npy"), dtype=np.int32, mode="r",
+        ).reshape(-1, 3)
+        self._actions_b = np.memmap(
+            os.path.join(mmap_dir, "actions_b.npy"), dtype=np.int32, mode="r",
+        ).reshape(-1, 3)
+        self.episode_ids = np.memmap(
+            os.path.join(mmap_dir, "episode_ids.npy"), dtype=np.int32, mode="r",
+        )
+        self.num_frames = len(self.episode_ids)
+
         self._valid_indices = self._compute_valid_indices()
+
+    @staticmethod
+    def _convert_hdf5_to_memmap(hdf5_path: str, mmap_dir: str) -> None:
+        """Convert HDF5 to flat memory-mapped numpy files."""
+        os.makedirs(mmap_dir, exist_ok=True)
+        print(f"Converting {hdf5_path} to memmap at {mmap_dir}...", flush=True)
+
+        with h5py.File(hdf5_path, "r") as f:
+            n = f["observations"].shape[0]
+
+            mapping = {
+                "obs": ("observations", np.uint8, (n, 84, 84, 3)),
+                "actions_a": ("actions_a", np.int32, (n, 3)),
+                "actions_b": ("actions_b", np.int32, (n, 3)),
+                "episode_ids": ("episode_ids", np.int32, (n,)),
+            }
+
+            for name, (hdf5_key, dtype, shape) in mapping.items():
+                mm = np.memmap(
+                    os.path.join(mmap_dir, f"{name}.npy"),
+                    dtype=dtype, mode="w+", shape=shape,
+                )
+                # Copy in chunks to avoid memory spikes
+                chunk = 10_000
+                for start in range(0, n, chunk):
+                    end = min(start + chunk, n)
+                    mm[start:end] = f[hdf5_key][start:end]
+                mm.flush()
+                del mm
+
+        print(f"Done! {n:,} frames converted.", flush=True)
 
     def _compute_valid_indices(self) -> np.ndarray:
         """Find valid start positions strided by self.stride within each episode."""
@@ -61,7 +105,6 @@ class HockeyTrajectoryDataset(Dataset):
             ep_start = ep_indices[0]
             ep_end = ep_indices[-1]
 
-            # Stride through the episode
             i = ep_start
             while i + self.span <= ep_end:
                 valid.append(i)
@@ -76,18 +119,17 @@ class HockeyTrajectoryDataset(Dataset):
         start = self._valid_indices[idx]
         indices = [start + i * self.frameskip for i in range(self.seq_len)]
 
-        with h5py.File(self.path, "r") as f:
-            obs = f["observations"][indices]       # (seq_len, 84, 84, 3) uint8
-            actions_a = f["actions_a"][indices]     # (seq_len, 3) int32
-            actions_b = f["actions_b"][indices]     # (seq_len, 3) int32
+        obs = self._obs[indices]              # (seq_len, 84, 84, 3) uint8
+        actions_a = self._actions_a[indices]   # (seq_len, 3) int32
+        actions_b = self._actions_b[indices]   # (seq_len, 3) int32
 
         # Normalize observations to [0, 1] float32, reorder to CHW
-        obs_tensor = torch.from_numpy(obs).float() / 255.0  # (T, H, W, C)
-        obs_tensor = obs_tensor.permute(0, 3, 1, 2)          # (T, C, H, W)
+        obs_tensor = torch.from_numpy(obs.copy()).float() / 255.0
+        obs_tensor = obs_tensor.permute(0, 3, 1, 2)  # (T, C, H, W)
 
         # Concatenate both teams' actions into joint action vector
         actions = np.concatenate([actions_a, actions_b], axis=-1)  # (T, 6)
-        actions_tensor = torch.from_numpy(actions).long()
+        actions_tensor = torch.from_numpy(actions.copy()).long()
 
         return {
             "obs": obs_tensor,        # (seq_len, 3, 84, 84) float32
