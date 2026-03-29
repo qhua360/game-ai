@@ -205,9 +205,15 @@ def train(
         log_model=False,
     )
 
+    # Use all available GPUs with DDP if multiple are present
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    strategy = "ddp" if num_gpus > 1 else "auto"
+
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator=accelerator,
+        devices="auto",
+        strategy=strategy,
         gradient_clip_val=gradient_clip_val,
         precision=precision,
         default_root_dir=checkpoint_dir,
