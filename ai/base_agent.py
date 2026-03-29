@@ -16,8 +16,11 @@ class Agent(ABC):
     Provides a uniform interface for the game loop and evaluation.
     """
 
-    def __init__(self, team: int) -> None:
+    def __init__(self, team: int, action_hold_frames: int = 1) -> None:
         self.team = team
+        self.action_hold_frames = action_hold_frames
+        self._held_actions: list[int] | None = None
+        self._hold_counter: int = 0
 
     @abstractmethod
     def get_actions(self, state: GameState, obs: np.ndarray | None = None) -> list[int]:
@@ -34,3 +37,5 @@ class Agent(ABC):
 
     def reset(self) -> None:
         """Reset agent state between episodes. Override if needed."""
+        self._held_actions = None
+        self._hold_counter = 0

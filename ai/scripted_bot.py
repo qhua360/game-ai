@@ -32,8 +32,8 @@ from games.hockey.entities import GameState, Phase, Player
 class ScriptedBot(Agent):
     """Rule-based bot with adjustable difficulty."""
 
-    def __init__(self, team: int, difficulty: str = "medium") -> None:
-        super().__init__(team)
+    def __init__(self, team: int, difficulty: str = "medium", action_hold_frames: int = 15) -> None:
+        super().__init__(team, action_hold_frames=action_hold_frames)
         self.difficulty = difficulty
         self._reaction_frames = {"easy": 12, "medium": 6, "hard": 0}[difficulty]
         self._random_chance = {"easy": 0.30, "medium": 0.10, "hard": 0.02}[difficulty]
@@ -45,6 +45,11 @@ class ScriptedBot(Agent):
 
         if state.phase != Phase.PLAY:
             return [ACTION_NONE] * PLAYERS_PER_TEAM
+
+        # Hold previous action for action_hold_frames
+        if self._hold_counter > 0 and self._held_actions is not None:
+            self._hold_counter -= 1
+            return self._held_actions
 
         my_players = state.team_players(self.team)
         actions = []
@@ -63,6 +68,9 @@ class ScriptedBot(Agent):
             action = self._decide(player, state, my_players)
             actions.append(action)
 
+        # Cache for action persistence
+        self._held_actions = actions
+        self._hold_counter = self.action_hold_frames - 1
         return actions
 
     def _decide(self, player: Player, state: GameState, teammates: list[Player]) -> int:
