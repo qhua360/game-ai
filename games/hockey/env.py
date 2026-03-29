@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import gymnasium as gym
@@ -24,6 +25,8 @@ from games.hockey.constants import (
     TEAM_B,
     TEAM_A_POSITIONS,
     TEAM_B_POSITIONS,
+    PLAYER_MAX_SPEED,
+    PUCK_MAX_SPEED,
     ACTION_NONE,
 )
 from games.hockey.entities import GameState, Phase, Player, Puck, Rink, create_goals
@@ -33,24 +36,38 @@ from games.hockey import sound as sound_module
 
 
 class HockeyEnv(gym.Env):
-    """2D Ice Hockey environment.
+    """2D Ice Hockey environment with configurable player counts.
 
     Observation: 84x84x3 RGB frame.
-    Action: One discrete action per player on the controlled team.
+    Action: One discrete action per player on team A.
+
+    Supports any combination of players:
+        HockeyEnv()                          # default 3v3
+        HockeyEnv(num_players_a=1, num_players_b=0)  # 1 player + puck
+        HockeyEnv(num_players_a=1, num_players_b=1)  # 1v1
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, render_mode: str | None = "human") -> None:
+    def __init__(
+        self,
+        render_mode: str | None = "human",
+        num_players_a: int = 3,
+        num_players_b: int = 3,
+        randomize_positions: bool = False,
+    ) -> None:
         super().__init__()
 
         self.render_mode = render_mode
+        self.num_players_a = num_players_a
+        self.num_players_b = num_players_b
+        self.randomize_positions = randomize_positions
 
         # Spaces
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(OBS_HEIGHT, OBS_WIDTH, 3), dtype=np.uint8
         )
-        self.action_space = spaces.MultiDiscrete([NUM_ACTIONS] * PLAYERS_PER_TEAM)
+        self.action_space = spaces.MultiDiscrete([NUM_ACTIONS] * num_players_a)
 
         # Internal state
         self._state: GameState | None = None
@@ -77,26 +94,55 @@ class HockeyEnv(gym.Env):
         rink = Rink()
         players = []
 
-        # Create team A players
-        for i, (fx, fy) in enumerate(TEAM_A_POSITIONS):
-            players.append(Player(
-                x=rink.x + fx * rink.width,
-                y=rink.y + fy * rink.height,
-                team=TEAM_A,
-                player_id=i,
-            ))
+        if self.randomize_positions:
+            # Random positions within the rink
+            rng = self.np_random if hasattr(self, "np_random") else np.random.default_rng()
+            for i in range(self.num_players_a):
+                players.append(Player(
+                    x=rink.x + rng.uniform(0.1, 0.9) * rink.width,
+                    y=rink.y + rng.uniform(0.1, 0.9) * rink.height,
+                    team=TEAM_A,
+                    player_id=i,
+                ))
+            for i in range(self.num_players_b):
+                players.append(Player(
+                    x=rink.x + rng.uniform(0.1, 0.9) * rink.width,
+                    y=rink.y + rng.uniform(0.1, 0.9) * rink.height,
+                    team=TEAM_B,
+                    player_id=self.num_players_a + i,
+                    facing_angle=math.pi,
+                ))
+            puck = Puck(
+                x=rink.x + rng.uniform(0.2, 0.8) * rink.width,
+                y=rink.y + rng.uniform(0.2, 0.8) * rink.height,
+            )
+        else:
+            # Default positions (trimmed to player count)
+            for i in range(self.num_players_a):
+                if i < len(TEAM_A_POSITIONS):
+                    fx, fy = TEAM_A_POSITIONS[i]
+                else:
+                    fx, fy = 0.3, 0.5  # fallback
+                players.append(Player(
+                    x=rink.x + fx * rink.width,
+                    y=rink.y + fy * rink.height,
+                    team=TEAM_A,
+                    player_id=i,
+                ))
+            for i in range(self.num_players_b):
+                if i < len(TEAM_B_POSITIONS):
+                    fx, fy = TEAM_B_POSITIONS[i]
+                else:
+                    fx, fy = 0.7, 0.5
+                players.append(Player(
+                    x=rink.x + fx * rink.width,
+                    y=rink.y + fy * rink.height,
+                    team=TEAM_B,
+                    player_id=self.num_players_a + i,
+                    facing_angle=math.pi,
+                ))
+            puck = Puck(x=rink.center_x, y=rink.center_y)
 
-        # Create team B players
-        for i, (fx, fy) in enumerate(TEAM_B_POSITIONS):
-            players.append(Player(
-                x=rink.x + fx * rink.width,
-                y=rink.y + fy * rink.height,
-                team=TEAM_B,
-                player_id=PLAYERS_PER_TEAM + i,
-                facing_angle=3.14159,  # face left
-            ))
-
-        puck = Puck(x=rink.center_x, y=rink.center_y)
         goals = create_goals(rink)
 
         self._state = GameState(
@@ -129,15 +175,15 @@ class HockeyEnv(gym.Env):
         assert self._state is not None, "Call reset() first"
 
         team_a_actions = list(action) if not isinstance(action, list) else action
-        team_b_actions = opponent_actions or [ACTION_NONE] * PLAYERS_PER_TEAM
+        team_b_actions = opponent_actions or [ACTION_NONE] * self.num_players_b
 
-        # Ensure correct lengths
-        while len(team_a_actions) < PLAYERS_PER_TEAM:
+        # Pad/trim to match actual player counts
+        while len(team_a_actions) < self.num_players_a:
             team_a_actions.append(ACTION_NONE)
-        while len(team_b_actions) < PLAYERS_PER_TEAM:
+        team_a_actions = team_a_actions[: self.num_players_a]
+        while len(team_b_actions) < self.num_players_b:
             team_b_actions.append(ACTION_NONE)
-
-        prev_score = list(self._state.score)
+        team_b_actions = team_b_actions[: self.num_players_b]
 
         # Physics step
         events = step_physics(self._state, team_a_actions, team_b_actions)
@@ -170,6 +216,38 @@ class HockeyEnv(gym.Env):
         info["events"] = events
 
         return obs, reward, terminated, truncated, info
+
+    def get_player_state(self, player_id: int = 0) -> np.ndarray:
+        """Get structured state vector for a player.
+
+        Returns normalized [0, 1] vector:
+            [my_x, my_y, my_vx, my_vy, has_puck, puck_x, puck_y, puck_vx, puck_vy]
+
+        This provides player identity and game context for the world model
+        predictor, complementing the visual observation.
+        """
+        assert self._state is not None
+        rink = self._state.rink
+
+        player = None
+        for p in self._state.players:
+            if p.player_id == player_id:
+                player = p
+                break
+        assert player is not None, f"Player {player_id} not found"
+
+        puck = self._state.puck
+        return np.array([
+            (player.x - rink.left) / rink.width,
+            (player.y - rink.top) / rink.height,
+            player.vx / PLAYER_MAX_SPEED * 0.5 + 0.5,  # normalize to [0, 1]
+            player.vy / PLAYER_MAX_SPEED * 0.5 + 0.5,
+            1.0 if player.has_puck else 0.0,
+            (puck.x - rink.left) / rink.width,
+            (puck.y - rink.top) / rink.height,
+            puck.vx / PUCK_MAX_SPEED * 0.5 + 0.5,
+            puck.vy / PUCK_MAX_SPEED * 0.5 + 0.5,
+        ], dtype=np.float32)
 
     def render(self) -> np.ndarray | None:
         if self._renderer is None:
