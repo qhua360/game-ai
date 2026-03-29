@@ -19,7 +19,7 @@ def merge_shards(shard_pattern: str, output_path: str) -> None:
 
     print(f"Merging {len(shard_paths)} shards: {shard_paths}")
 
-    # First pass: count total frames and collect episode offsets
+    # First pass: count total frames
     total_frames = 0
     shard_info = []
     episode_offset = 0
@@ -34,34 +34,32 @@ def merge_shards(shard_pattern: str, output_path: str) -> None:
 
     print(f"Total: {total_frames:,} frames")
 
-    # Second pass: stream copy chunk by chunk
+    # Detect schema from first shard
+    with h5py.File(shard_paths[0], "r") as ref:
+        dataset_keys = list(ref.keys())
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    chunk_size = 1024  # copy this many frames at a time
+    chunk_size = 1024
 
     with h5py.File(output_path, "w") as out:
-        # Get shape info from first shard
+        # Create output datasets matching first shard's schema
+        datasets = {}
         with h5py.File(shard_paths[0], "r") as ref:
-            obs_shape = ref["observations"].shape[1:]  # (84, 84, 3)
-            act_a_cols = ref["actions_a"].shape[1]
-            act_b_cols = ref["actions_b"].shape[1]
+            for key in dataset_keys:
+                src = ref[key]
+                shape = (total_frames, *src.shape[1:])
+                kwargs = {"dtype": src.dtype}
+                if key == "observations":
+                    kwargs["chunks"] = (128, *src.shape[1:])
+                    kwargs["compression"] = "gzip"
+                    kwargs["compression_opts"] = 1
+                elif len(src.shape) > 1:
+                    kwargs["chunks"] = (1024, *src.shape[1:])
+                else:
+                    kwargs["chunks"] = (4096,)
+                datasets[key] = out.create_dataset(key, shape=shape, **kwargs)
 
-        ds_obs = out.create_dataset(
-            "observations", shape=(total_frames, *obs_shape),
-            dtype=np.uint8, chunks=(128, *obs_shape), compression="gzip", compression_opts=1,
-        )
-        ds_act_a = out.create_dataset(
-            "actions_a", shape=(total_frames, act_a_cols),
-            dtype=np.int32, chunks=(1024, act_a_cols),
-        )
-        ds_act_b = out.create_dataset(
-            "actions_b", shape=(total_frames, act_b_cols),
-            dtype=np.int32, chunks=(1024, act_b_cols),
-        )
-        ds_ep = out.create_dataset(
-            "episode_ids", shape=(total_frames,),
-            dtype=np.int32, chunks=(4096,),
-        )
-
+        # Stream copy
         write_idx = 0
         for info in shard_info:
             with h5py.File(info["path"], "r") as f:
@@ -69,14 +67,13 @@ def merge_shards(shard_pattern: str, output_path: str) -> None:
                 ep_off = info["ep_offset"]
                 for start in range(0, n, chunk_size):
                     end = min(start + chunk_size, n)
-                    ds_obs[write_idx:write_idx + (end - start)] = f["observations"][start:end]
-                    ds_act_a[write_idx:write_idx + (end - start)] = f["actions_a"][start:end]
-                    ds_act_b[write_idx:write_idx + (end - start)] = f["actions_b"][start:end]
-                    ds_ep[write_idx:write_idx + (end - start)] = f["episode_ids"][start:end] + ep_off
-                    write_idx += end - start
-
-                if write_idx % 100_000 < chunk_size:
-                    print(f"  Written {write_idx:,}/{total_frames:,} frames...")
+                    size = end - start
+                    for key in dataset_keys:
+                        data = f[key][start:end]
+                        if key == "episode_ids":
+                            data = data + ep_off
+                        datasets[key][write_idx:write_idx + size] = data
+                    write_idx += size
 
             print(f"  Finished {info['path']}")
 
