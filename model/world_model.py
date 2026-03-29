@@ -19,16 +19,7 @@ class LeWM(nn.Module):
     """JEPA World Model.
 
     Learns to predict future latent embeddings from current observations
-    and actions. The encoder maps frames to a compact latent space, and
-    the predictor forecasts next-frame embeddings conditioned on actions.
-
-    Training loss computation is handled by the forward function passed
-    to spt.Module (see model/train.py), not by this class.
-
-    Architecture:
-        - Encoder: ViT-Tiny via spt (~5M params) — 84x84 RGB → 192-dim
-        - Predictor: 6-layer Transformer with AdaLN (~10M params)
-        - Total: ~15M parameters
+    and a single controlled player's action.
     """
 
     def __init__(
@@ -43,12 +34,11 @@ class LeWM(nn.Module):
         # Predictor params
         predictor_depth: int = 6,
         predictor_heads: int = 16,
-        predictor_dim_head: int = 12,
+        predictor_dim_head: int = 64,
         predictor_mlp_dim: int = 2048,
         predictor_dropout: float = 0.1,
         # Action params
         num_actions: int = 12,
-        num_players: int = 6,
     ) -> None:
         super().__init__()
 
@@ -56,7 +46,6 @@ class LeWM(nn.Module):
         self.history_size = history_size
         self.num_preds = num_preds
 
-        # Encoder (via stable-pretraining vit_hf)
         self.encoder = ViTTinyEncoder(
             encoder_scale=encoder_scale,
             image_size=img_size,
@@ -64,7 +53,6 @@ class LeWM(nn.Module):
             embed_dim=embed_dim,
         )
 
-        # Predictor
         self.predictor = ARPredictor(
             embed_dim=embed_dim,
             depth=predictor_depth,
@@ -72,7 +60,6 @@ class LeWM(nn.Module):
             dim_head=predictor_dim_head,
             mlp_dim=predictor_mlp_dim,
             num_actions=num_actions,
-            num_players=num_players,
             dropout=predictor_dropout,
         )
 
@@ -92,7 +79,7 @@ class LeWM(nn.Module):
 
         Args:
             ctx_emb: (B, T, D) context embeddings.
-            ctx_actions: (B, T, 6) context actions.
+            ctx_actions: (B, T) controlled player's action.
 
         Returns:
             (B, T, D) predicted embeddings.
@@ -108,28 +95,26 @@ class LeWM(nn.Module):
 
         Args:
             initial_emb: (B, history_size, D) — initial context embeddings.
-            action_sequences: (B, S, H, 6) — S candidate action sequences of horizon H.
+            action_sequences: (B, S, H) — S candidate action sequences of horizon H.
 
         Returns:
             (B, S, H, D) — predicted embedding trajectories.
         """
-        B, S, H, A = action_sequences.shape
+        B, S, H = action_sequences.shape
         D = initial_emb.shape[-1]
         hist = self.history_size
 
         ctx = initial_emb.unsqueeze(1).expand(B, S, hist, D).reshape(B * S, hist, D)
-        # Pad action history with zeros to match history size
-        act_history = torch.zeros(B * S, hist, A, device=initial_emb.device, dtype=action_sequences.dtype)
+        act_history = torch.zeros(B * S, hist, device=initial_emb.device, dtype=action_sequences.dtype)
         predictions = []
 
         for t in range(H):
-            act = action_sequences[:, :, t].reshape(B * S, 1, A)
+            act = action_sequences[:, :, t].reshape(B * S)
 
-            # Shift action history left and insert new action at the end
-            act_history = torch.cat([act_history[:, 1:], act], dim=1)  # (B*S, hist, A)
+            act_history = torch.cat([act_history[:, 1:], act.unsqueeze(1)], dim=1)
 
-            pred = self.predict(ctx[:, -hist:], act_history)  # (B*S, hist, D)
-            next_emb = pred[:, -1:]  # (B*S, 1, D)
+            pred = self.predict(ctx[:, -hist:], act_history)
+            next_emb = pred[:, -1:]
             predictions.append(next_emb)
 
             ctx = torch.cat([ctx, next_emb], dim=1)
@@ -137,42 +122,37 @@ class LeWM(nn.Module):
         result = torch.cat(predictions, dim=1).reshape(B, S, H, D)
         return result
 
-    def criterion(
-        self,
-        predicted_emb: torch.Tensor,
-        goal_emb: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute MSE cost between final predicted embedding and goal.
-
-        Args:
-            predicted_emb: (B, S, H, D) predicted trajectory embeddings.
-            goal_emb: (B, 1, D) goal state embedding.
-
-        Returns:
-            (B, S) cost per sample — lower is better.
-        """
-        final = predicted_emb[:, :, -1]  # (B, S, D)
-        goal = goal_emb.expand_as(final)  # (B, S, D)
-        return (final - goal).pow(2).mean(dim=-1)  # (B, S)
-
     def get_cost(
         self,
         initial_emb: torch.Tensor,
-        goal_emb: torch.Tensor,
         action_candidates: torch.Tensor,
+        puck_probe: torch.nn.Module,
+        target_x: float = 1.0,
+        target_y: float = 0.5,
     ) -> torch.Tensor:
-        """Compute cost for CEM planning.
+        """Compute cost for CEM planning using puck position probe.
 
         Args:
             initial_emb: (1, history_size, D) context embeddings.
-            goal_emb: (1, 1, D) goal state embedding.
-            action_candidates: (1, S, H, 6) candidate action sequences.
+            action_candidates: (1, S, H) candidate action sequences.
+            puck_probe: Linear(192, 2) mapping embeddings to (puck_x, puck_y).
+            target_x: Normalized x position of opponent goal.
+            target_y: Normalized y position of opponent goal.
 
         Returns:
-            (1, S) cost per candidate.
+            (1, S) cost per candidate — lower is better.
         """
-        predicted = self.rollout(initial_emb, action_candidates)  # (1, S, H, D)
-        return self.criterion(predicted, goal_emb)  # (1, S)
+        predicted = self.rollout(initial_emb, action_candidates)
+        final_emb = predicted[:, :, -1]  # (1, S, D)
+        B, S, D = final_emb.shape
+
+        pred_pos = puck_probe(final_emb.reshape(B * S, D))
+        pred_pos = pred_pos.reshape(B, S, 2)
+
+        dx = pred_pos[:, :, 0] - target_x
+        dy = pred_pos[:, :, 1] - target_y
+        cost = dx.pow(2) + dy.pow(2)
+        return cost
 
     def param_count(self) -> dict[str, int]:
         """Count parameters by component."""

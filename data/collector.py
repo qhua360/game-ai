@@ -2,6 +2,8 @@
 
 Streams frames directly to HDF5 on disk — constant memory usage regardless
 of episode count. Supports configurable player counts.
+
+Saves only the controlled player's action (player 0 on team A).
 """
 
 from __future__ import annotations
@@ -26,10 +28,8 @@ from ai.scripted_bot import ScriptedBot
 from games.hockey.constants import ACTION_NONE, NUM_ACTIONS, TEAM_A, TEAM_B
 from games.hockey.env import HockeyEnv
 
-# Initial allocation size and growth factor for resizable HDF5 datasets
 INITIAL_CAPACITY = 10_000
 GROWTH_FACTOR = 2
-STATE_DIM = 9  # player state vector size
 
 
 def collect_episodes(
@@ -56,7 +56,6 @@ def collect_episodes(
     capacity = INITIAL_CAPACITY
 
     with h5py.File(output_path, "w") as f:
-        # Store config for later use
         f.attrs["num_players_a"] = num_players_a
         f.attrs["num_players_b"] = num_players_b
         f.attrs["action_hold_frames"] = action_hold_frames
@@ -66,20 +65,10 @@ def collect_episodes(
             shape=(capacity, 84, 84, 3), maxshape=(None, 84, 84, 3),
             dtype=np.uint8, chunks=(128, 84, 84, 3), compression="gzip", compression_opts=1,
         )
-        ds_act_a = f.create_dataset(
-            "actions_a",
-            shape=(capacity, num_players_a), maxshape=(None, num_players_a),
-            dtype=np.int32, chunks=(1024, num_players_a),
-        )
-        ds_act_b = f.create_dataset(
-            "actions_b",
-            shape=(capacity, max(1, num_players_b)), maxshape=(None, max(1, num_players_b)),
-            dtype=np.int32, chunks=(1024, max(1, num_players_b)),
-        )
-        ds_state = f.create_dataset(
-            "state_vectors",
-            shape=(capacity, STATE_DIM), maxshape=(None, STATE_DIM),
-            dtype=np.float32, chunks=(1024, STATE_DIM),
+        ds_actions = f.create_dataset(
+            "actions",
+            shape=(capacity,), maxshape=(None,),
+            dtype=np.int32, chunks=(4096,),
         )
         ds_ep = f.create_dataset(
             "episode_ids",
@@ -90,35 +79,25 @@ def collect_episodes(
         def _grow():
             nonlocal capacity
             capacity = int(capacity * GROWTH_FACTOR)
-            for ds in [ds_obs, ds_act_a, ds_act_b, ds_state, ds_ep]:
+            for ds in [ds_obs, ds_actions, ds_ep]:
                 ds.resize(capacity, axis=0)
 
         for ep in range(num_episodes):
-            # Create bots with action persistence
             bot_a = ScriptedBot(team=TEAM_A, difficulty="medium", action_hold_frames=action_hold_frames)
-            if num_players_b > 0:
-                bot_b = ScriptedBot(team=TEAM_B, difficulty="medium", action_hold_frames=action_hold_frames)
+            bot_b = ScriptedBot(team=TEAM_B, difficulty="medium", action_hold_frames=action_hold_frames) if num_players_b > 0 else None
 
             obs, info = env.reset()
 
             for step in range(max_steps_per_episode):
-                # Get actions (with persistence — same action held for N frames)
                 actions_a = bot_a.get_actions(info["state"])
+                actions_b = bot_b.get_actions(info["state"]) if bot_b else []
 
-                if num_players_b > 0:
-                    actions_b = bot_b.get_actions(info["state"])
-                else:
-                    actions_b = []
-
-                # Only save during PLAY phase
                 if info["phase"] == "PLAY":
                     if write_idx >= capacity:
                         _grow()
 
                     ds_obs[write_idx] = obs
-                    ds_act_a[write_idx] = actions_a
-                    ds_act_b[write_idx] = actions_b if actions_b else [0]
-                    ds_state[write_idx] = env.get_player_state(player_id=0)
+                    ds_actions[write_idx] = actions_a[0]  # controlled player's action only
                     ds_ep[write_idx] = ep
                     write_idx += 1
 
@@ -139,8 +118,7 @@ def collect_episodes(
                     flush=True,
                 )
 
-        # Trim datasets to actual size
-        for ds in [ds_obs, ds_act_a, ds_act_b, ds_state, ds_ep]:
+        for ds in [ds_obs, ds_actions, ds_ep]:
             ds.resize(write_idx, axis=0)
 
     env.close()
@@ -157,9 +135,9 @@ def main() -> None:
     parser.add_argument("--output", type=str, default="data/trajectories/bot_v_bot.h5")
     parser.add_argument("--num-players-a", type=int, default=3)
     parser.add_argument("--num-players-b", type=int, default=3)
-    parser.add_argument("--randomize", action="store_true", help="Randomize positions each episode")
+    parser.add_argument("--randomize", action="store_true")
     parser.add_argument("--max-steps", type=int, default=25000)
-    parser.add_argument("--action-hold", type=int, default=15, help="Frames to hold each action")
+    parser.add_argument("--action-hold", type=int, default=15)
     args = parser.parse_args()
 
     collect_episodes(

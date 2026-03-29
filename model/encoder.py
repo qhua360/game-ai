@@ -49,10 +49,12 @@ class ViTTinyEncoder(nn.Module):
         hidden_dim = self.encoder.config.hidden_size
         self.embed_dim = embed_dim
 
-        # Projector: CLS token → final embedding
+        # Projector: CLS token → final embedding (matches LeWM MLP pattern)
         self.projector = nn.Sequential(
-            nn.Linear(hidden_dim, embed_dim),
-            nn.BatchNorm1d(embed_dim),
+            nn.Linear(hidden_dim, 4 * embed_dim),
+            nn.LayerNorm(4 * embed_dim),
+            nn.GELU(),
+            nn.Linear(4 * embed_dim, embed_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

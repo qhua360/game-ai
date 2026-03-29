@@ -35,7 +35,7 @@ def lejepa_forward(self, batch: dict, stage: str, *, cfg: dict) -> dict:
         - self.sigreg: SIGReg regularizer
 
     Args:
-        batch: Dict with "obs" (B, T, C, H, W) and "actions" (B, T, 6).
+        batch: Dict with "obs" (B, T, C, H, W) and "actions" (B, T).
         stage: "fit" or "validate".
         cfg: Training config dict.
 

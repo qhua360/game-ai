@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import h5py
@@ -14,19 +15,8 @@ class HockeyTrajectoryDataset(Dataset):
     """Loads sub-trajectories for JEPA training.
 
     Converts HDF5 to memory-mapped numpy files on first load for fast
-    random access that scales to any dataset size.
-
-        frameskip=15, stride=3, seq_len=4:
-        Sample 0: frames [0,  15, 30, 45]
-        Sample 1: frames [3,  18, 33, 48]
-        Sample 2: frames [6,  21, 36, 51]
-        ...
-
-    Args:
-        path: Path to HDF5 trajectory file.
-        seq_len: Number of frames per sample.
-        frameskip: Gap between frames within a sample (in raw frames).
-        stride: Gap between sample start positions (in raw frames).
+    random access. Each sample contains RGB frames and the controlled
+    player's discrete action.
     """
 
     def __init__(
@@ -41,24 +31,25 @@ class HockeyTrajectoryDataset(Dataset):
         self.stride = stride
         self.span = (seq_len - 1) * frameskip
 
-        # Convert HDF5 to memmap on first use, then open memmap
+        # Convert HDF5 to memmap on first use
         mmap_dir = path + ".mmap"
         if not os.path.exists(mmap_dir):
             self._convert_hdf5_to_memmap(path, mmap_dir)
 
+        with open(os.path.join(mmap_dir, "meta.json"), "r") as f:
+            meta = json.load(f)
+
+        n = meta["num_frames"]
         self._obs = np.memmap(
             os.path.join(mmap_dir, "obs.npy"), dtype=np.uint8, mode="r",
-        ).reshape(-1, 84, 84, 3)
-        self._actions_a = np.memmap(
-            os.path.join(mmap_dir, "actions_a.npy"), dtype=np.int32, mode="r",
-        ).reshape(-1, 3)
-        self._actions_b = np.memmap(
-            os.path.join(mmap_dir, "actions_b.npy"), dtype=np.int32, mode="r",
-        ).reshape(-1, 3)
+        ).reshape(n, 84, 84, 3)
+        self._actions = np.memmap(
+            os.path.join(mmap_dir, "actions.npy"), dtype=np.int32, mode="r",
+        ).reshape(n)
         self.episode_ids = np.memmap(
             os.path.join(mmap_dir, "episode_ids.npy"), dtype=np.int32, mode="r",
         )
-        self.num_frames = len(self.episode_ids)
+        self.num_frames = n
 
         self._valid_indices = self._compute_valid_indices()
 
@@ -71,10 +62,12 @@ class HockeyTrajectoryDataset(Dataset):
         with h5py.File(hdf5_path, "r") as f:
             n = f["observations"].shape[0]
 
+            with open(os.path.join(mmap_dir, "meta.json"), "w") as mf:
+                json.dump({"num_frames": n}, mf)
+
             mapping = {
                 "obs": ("observations", np.uint8, (n, 84, 84, 3)),
-                "actions_a": ("actions_a", np.int32, (n, 3)),
-                "actions_b": ("actions_b", np.int32, (n, 3)),
+                "actions": ("actions", np.int32, (n,)),
                 "episode_ids": ("episode_ids", np.int32, (n,)),
             }
 
@@ -83,7 +76,6 @@ class HockeyTrajectoryDataset(Dataset):
                     os.path.join(mmap_dir, f"{name}.npy"),
                     dtype=dtype, mode="w+", shape=shape,
                 )
-                # Copy in chunks to avoid memory spikes
                 chunk = 10_000
                 for start in range(0, n, chunk):
                     end = min(start + chunk, n)
@@ -119,21 +111,16 @@ class HockeyTrajectoryDataset(Dataset):
         start = self._valid_indices[idx]
         indices = [start + i * self.frameskip for i in range(self.seq_len)]
 
-        obs = self._obs[indices]              # (seq_len, 84, 84, 3) uint8
-        actions_a = self._actions_a[indices]   # (seq_len, 3) int32
-        actions_b = self._actions_b[indices]   # (seq_len, 3) int32
+        obs = self._obs[indices]          # (T, 84, 84, 3) uint8
+        actions = self._actions[indices]   # (T,) int32
 
-        # Normalize observations to [0, 1] float32, reorder to CHW
         obs_tensor = torch.from_numpy(obs.copy()).float() / 255.0
         obs_tensor = obs_tensor.permute(0, 3, 1, 2)  # (T, C, H, W)
-
-        # Concatenate both teams' actions into joint action vector
-        actions = np.concatenate([actions_a, actions_b], axis=-1)  # (T, 6)
         actions_tensor = torch.from_numpy(actions.copy()).long()
 
         return {
-            "obs": obs_tensor,        # (seq_len, 3, 84, 84) float32
-            "actions": actions_tensor,  # (seq_len, 6) int64
+            "obs": obs_tensor,         # (T, 3, 84, 84) float32
+            "actions": actions_tensor,  # (T,) int64
         }
 
 

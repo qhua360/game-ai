@@ -25,8 +25,6 @@ from games.hockey.constants import (
     TEAM_B,
     TEAM_A_POSITIONS,
     TEAM_B_POSITIONS,
-    PLAYER_MAX_SPEED,
-    PUCK_MAX_SPEED,
     ACTION_NONE,
 )
 from games.hockey.entities import GameState, Phase, Player, Puck, Rink, create_goals
@@ -216,38 +214,6 @@ class HockeyEnv(gym.Env):
         info["events"] = events
 
         return obs, reward, terminated, truncated, info
-
-    def get_player_state(self, player_id: int = 0) -> np.ndarray:
-        """Get structured state vector for a player.
-
-        Returns normalized [0, 1] vector:
-            [my_x, my_y, my_vx, my_vy, has_puck, puck_x, puck_y, puck_vx, puck_vy]
-
-        This provides player identity and game context for the world model
-        predictor, complementing the visual observation.
-        """
-        assert self._state is not None
-        rink = self._state.rink
-
-        player = None
-        for p in self._state.players:
-            if p.player_id == player_id:
-                player = p
-                break
-        assert player is not None, f"Player {player_id} not found"
-
-        puck = self._state.puck
-        return np.array([
-            (player.x - rink.left) / rink.width,
-            (player.y - rink.top) / rink.height,
-            player.vx / PLAYER_MAX_SPEED * 0.5 + 0.5,  # normalize to [0, 1]
-            player.vy / PLAYER_MAX_SPEED * 0.5 + 0.5,
-            1.0 if player.has_puck else 0.0,
-            (puck.x - rink.left) / rink.width,
-            (puck.y - rink.top) / rink.height,
-            puck.vx / PUCK_MAX_SPEED * 0.5 + 0.5,
-            puck.vy / PUCK_MAX_SPEED * 0.5 + 0.5,
-        ], dtype=np.float32)
 
     def render(self) -> np.ndarray | None:
         if self._renderer is None:
